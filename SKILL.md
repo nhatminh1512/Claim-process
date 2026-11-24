@@ -44,6 +44,12 @@ End-to-end procedure for filing a Bossard Vietnam overseas travel expense claim 
    - Unpaired-only columns keep the template's original total formula.
 6. **Weighted Exchange Rate**:
    - Over foreign receipts that have a valid `vnd_amount` (excluding pure VND rows and `Perdiem`), compute `round(sum(vnd_amount) / sum(foreign_amount), 3)` and write it across every expense grid column on the `Exchange Rate` row.
+7. **Strict Excel Output Rules**:
+   - **Short, standardized `Description` only**: Use concise standard labels (e.g., `Travel from <Origin> to <Destination>`). Never include dates, full street addresses, `"— Travel From..."`, `"card deduction"`, or pairing commentary in `Description`. Use the **exact identical** `Description` string (same wording and capitalization) in both the Foreign Currency block and the VND block.
+   - **Preserve target/confirmed row order**: Write rows in the exact order confirmed for the target form (do **not** auto-sort Excel rows chronologically unless explicitly asked), keeping the exact same row order in both the Foreign Currency section and the VND section.
+   - **Leave `Remark` and extra columns blank/untouched**: Never write notes such as `"Grab ride; Amex ..."`, `"Provisional ..."`, or pairing commentary into `Remark` or any non-description/non-leaf-amount column unless explicitly instructed.
+   - **Exact formula behavior**: Preserve `Sub Total in VND` multiplication formulas (`foreign sum × exchange rate`) untouched; on paired columns, `Total in VND` sums the actual VND deduction rows (`=SUM(...)`), not the converted foreign amounts.
+   - **Leave header fields blank unless instructed**: Leave `Name`, `Period Covered From/To`, `Purpose of Trip`, `Location`, `Cost Center`, and `Currency Type` blank/untouched unless the user explicitly provides values to fill them.
 
 ---
 
@@ -55,7 +61,7 @@ When reading uploaded images (via vision model and/or OCR), extract structured m
 |---|---|
 | `document_kind` | `foreign_invoice`, `vnd_deduction`, or `unclear` |
 | `amount` | Printed **GRAND TOTAL** for invoices (including tolls/fees/tax; never subtotal or line item; never convert currency). Absolute value of **deducted/provisional VND** for bank/card proofs (e.g. `-192,510 VND` or `(tạm tính 533,997VND)` → `533997`; **never** account balance or credit limit such as `Số dư khả dụng` / `Hạn mức khả dụng`). `null` + `unreadable=true` if illegible. |
-| `currency` | Normalize printed aliases (`RM` → `MYR`, `US$` → `USD`, `S$` → `SGD`, `RMB` → `CNY`, etc.) for bills; `VND` for bank/card proofs. |
+| `currency` | Preserve the printed bill currency code as confirmed for display (e.g. `MYR` vs `RM`), while normalizing aliases (`RM` → `MYR`, `US$` → `USD`, `S$` → `SGD`, `RMB` → `CNY`, etc.) internally for FX-band validation and pairing; use `VND` for bank/card proofs. |
 | `currency_kind` | `"VND"` if the expense itself is VND (or a standalone `vnd_deduction` row); otherwise `"FOREIGN"`. |
 | `foreign_amount` | *(Optional, on dual-currency bank/card alerts)* Foreign transaction amount printed in the alert (e.g., `83.43` from `giao dịch 83.43 MYR (tạm tính 533,997VND)`). |
 | `foreign_currency` | *(Optional, on dual-currency bank/card alerts)* Normalized foreign currency printed in the alert (e.g., `MYR`). |
@@ -140,7 +146,24 @@ Before exporting files, present a concise Markdown review table to the user:
   - Any possible duplicates (same amount + date/vendor).
   - Any unpaired `pending_proofs` (suggest matching foreign rows by date/vendor/rate/foreign_amount).
   - Any column mixing paired and unpaired foreign rows (must be resolved before export).
-- Ask the user to confirm or edit `purpose`, `column`, optional trip header fields (if filling header), and any missing amounts. Only run the export tool once all gates in Section 1 pass.
+- Ask the user to confirm or edit short standardized `purpose` descriptions, row order, `column`, optional trip header fields (defaulting header fields to blank if omitted), and any missing amounts. Only run the export tool once all gates in Section 1 pass.
+
+### Strict Word Proof Pack Output Rules (Anti-Bloat)
+
+Always generate the Word proof pack by executing the embedded `claim_tool.py export` command (never hand-write an ad-hoc narrative `.docx` script):
+
+1. **Exact title & subtitle**: Heading 1 `Receipt Proof Pack`, followed by subtitle `Overseas travel expense claim · <N> receipt(s) · grouped by bill date`.
+2. **Strict bill-date grouping & exact Excel parity**: Group strictly by bill date (`DD/MM/YYYY`, oldest first). Under each date heading, show only the **exact same short description** as Excel (identical wording and capitalization) and the single amount line (`<CUR> <foreign_amount> · VND deducted <total_vnd>`, preserving confirmed currency label verbatim).
+3. **Clean 2-column image table per receipt**:
+   - Left column: `Foreign-currency bill`
+   - Right column: `VND deduction proof` (or numbered `VND deduction proof 1 (<amt> VND)` / `VND deduction proof 2 (<amt> VND)` when split; odd-row extra proof merged & centered).
+   - Never label images `"source image 1/2/3..."`.
+4. **Zero narrative bloat (strictly forbidden)**:
+   - Never include opening summary paragraphs.
+   - Never include business-purpose summary tables.
+   - Never include `"Evidence"` sentences or pairing-confirmation explanations.
+   - Never include provisional/`tạm tính` commentary or `"intentionally blank"` notes.
+   - Never include reconciliation notes at the end or any mention of source image numbers / pairing confirmations.
 
 ---
 
@@ -397,7 +420,7 @@ def inspect_overseas_mapping(xlsx_path: str | Path) -> SheetMapping:
     try:
         wb = load_workbook(xlsx_path, data_only=False)
     except (
-        BadZipFile, InvalidFileException, KeyError, OSError, ParseError, TypeError, ValueError
+        zipfile.BadZipFile, InvalidFileException, KeyError, OSError, ParseError, TypeError, ValueError
     ) as exc:
         raise ClaimToolError("template is not a readable Excel workbook") from exc
     try:
@@ -869,9 +892,9 @@ def build_proof_pack(receipts: list[Receipt], dest: Path) -> None:
             run.bold = True
             run.font.size = Pt(11)
 
-            cur = "VND" if r.currency_kind == "VND" else normalize_currency(r.currency)
-            if cur == "VND" and r.currency_kind != "VND":
-                cur = ""
+            cur = "VND" if r.currency_kind == "VND" else (
+                "" if (r.currency or "").strip().upper() == "VND" else (r.currency or "").strip()
+            )
             parts = [f"VND {_fmt_money(r.amount, vnd=True)}"] if r.currency_kind == "VND" else [
                 f"{cur + ' ' if cur else 'Foreign amount '}{_fmt_money(r.amount)}".strip()
             ]
@@ -1115,11 +1138,12 @@ if __name__ == "__main__":
 
 After running `export`, always verify before delivering to the user:
 1. Open `<stem> - filled.xlsx` with `openpyxl(..., data_only=False)`:
-   - Purposes and amounts landed in the discovered foreign & VND rows (with written rows unhidden and unused rows untouched).
-   - Paired columns have `SUM(<col><vnd_start>:<col><total_row-1>)` on `Total in VND` (no double counting).
+   - Identical short `Description` values and confirmed row order landed in both the foreign & VND rows (with written rows unhidden and unused rows untouched).
+   - `Remark` column and non-leaf columns are empty; header cells remain blank unless values were explicitly supplied.
+   - `Sub Total in VND` multiplication formula remains intact, and paired columns have `SUM(<col><vnd_start>:<col><total_row-1>)` on `Total in VND` (no double counting).
    - `Exchange Rate` row matches `round(sum(vnd_amount) / sum(foreign_amount), 3)` across expense columns.
    - `xl/media/*` logo and `xl/workbook.xml` `fullCalcOnLoad="1"` are intact.
 2. Open `<stem> - proof pack.docx` with `python-docx`:
-   - `len(doc.inline_shapes)` equals total attached bill + primary + extra images.
-   - Date headings (`dd/mm/yyyy`), normalized currency labels, purposes, and VND totals match the claim JSON.
+   - Exact title `Receipt Proof Pack` and subtitle `Overseas travel expense claim · <N> receipt(s) · grouped by bill date`.
+   - Strict `dd/mm/yyyy` date grouping, verbatim description/currency/amount parity with Excel, 2-column image tables with numbered split captions, `len(doc.inline_shapes)` matching total attached images, and zero narrative paragraphs/tables/notes.
 3. If running the web app locally alongside `.env`, ensure shell env vars do not silently shadow `.env` (`load_dotenv(override=True)` or unset stale `DEEPSEEK_API_KEY` in the shell).
